@@ -20,6 +20,7 @@ library(gridExtra)  # Arranging multiple plots
 library(lubridate)
 library(dplyr)
 library(tidyr)
+library(purrr)
 ```
 
 ```{r setup, include=FALSE}
@@ -205,6 +206,13 @@ for (commodity in names(commodities)) {
 
 ```
 ```{r}
+#ADF test for each transformation
+
+
+```
+
+
+```{r}
 # Function to create ACF and PACF plots for log differenced series
 plot_acf_pacf <- function(data, commodity_name) {
   # Remove NA values from log_diff_value
@@ -272,6 +280,396 @@ analyze_commodity <- function(data, commodity_name) {
   
   # Reset plot layout
   par(mfrow = c(1, 1))
+}
+```
+```{r}
+# Function to fit auto.arima model and provide summary information
+fit_auto_arima <- function(data, commodity_name) {
+  # Remove NA values from log_diff_value
+  clean_data <- na.omit(data[, c("date", "log_diff_value")])
+  
+  # Convert to time series object - we're working with log differenced data
+  # Note that we're using the log_diff_value column directly
+  ts_data <- ts(clean_data$log_diff_value)
+  
+  # Fit auto.arima model with d=0 since we're already using differenced data
+  cat("\n=======================================================\n")
+  cat("ARIMA Model Analysis for", commodity_name, "(Log Differenced Series)\n")
+  cat("=======================================================\n")
+  
+  # Set d=0 since data is already differenced
+  model <- auto.arima(ts_data, d=0, seasonal = FALSE, stepwise = FALSE, 
+                     approximation = FALSE, trace = TRUE)
+  
+  # Print model summary
+  cat("\nBest Model Summary:\n")
+  print(summary(model))
+  
+  # Return model
+  return(model)
+}
+
+# Function to create forecast plots
+plot_arima_forecast <- function(model, data, commodity_name) {
+  # Clean data
+  clean_data <- na.omit(data[, c("date", "log_diff_value")])
+  ts_data <- ts(clean_data$log_diff_value)
+  
+  # Generate forecast
+  forecast_result <- forecast(model, h = 12)  # Forecast 12 periods ahead
+  
+  # Plot the forecast
+  plot_forecast <- autoplot(forecast_result) +
+    theme_minimal() +
+    labs(title = paste(commodity_name, "- ARIMA Forecast of Log Differenced Series"),
+         x = "Time", y = "Log Price Change") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Plot the model diagnostics
+  plot_diagnostics <- checkresiduals(model, plot = FALSE)
+  
+  # Create diagnostic plots manually for better control
+  residuals <- residuals(model)
+  
+  # Residual plot
+  p1 <- ggplot(data.frame(x = 1:length(residuals), y = residuals), aes(x = x, y = y)) +
+    geom_line() +
+    theme_minimal() +
+    labs(title = "Residuals", x = "Time", y = "")
+  
+  # ACF of residuals
+  p2 <- ggAcf(residuals) +
+    theme_minimal() +
+    labs(title = "ACF of Residuals")
+  
+  # Histogram of residuals
+  p3 <- ggplot(data.frame(residuals = residuals), aes(x = residuals)) +
+    geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+    theme_minimal() +
+    labs(title = "Histogram of Residuals", x = "")
+  
+  # Normal Q-Q plot
+  p4 <- ggplot(data.frame(residuals = residuals), aes(sample = residuals)) +
+    stat_qq() +
+    stat_qq_line() +
+    theme_minimal() +
+    labs(title = "Normal Q-Q Plot")
+  
+  # Arrange diagnostic plots
+  grid.arrange(plot_forecast, 
+               arrangeGrob(p1, p2, p3, p4, ncol = 2),
+               ncol = 1, heights = c(1, 1.2))
+  
+  # Return diagnostic statistics
+  return(Box.test(residuals, lag = 10, type = "Ljung-Box"))
+}
+
+# List of commodities and their transformed data
+commodities <- list(
+  Coffee = coffee_trans,
+  Copper = copper_trans,
+  Corn = corn_trans,
+  Cotton = cotton_trans,
+  Lumber = lumber_trans,
+  Oats = oats_trans,
+  Soybean = soybean_trans,
+  Wheat = wheat_trans
+)
+
+# Create container to store models
+commodity_models <- list()
+
+# Loop through commodities and fit ARIMA models
+for (commodity in names(commodities)) {
+  # Fit model
+  model <- fit_auto_arima(commodities[[commodity]], commodity)
+  
+  # Store model
+  commodity_models[[commodity]] <- model
+  
+  # Plot forecast
+  plot_arima_forecast(model, commodities[[commodity]], commodity)
+}
+
+# Create summary table of all models
+model_summary <- data.frame(
+  Commodity = character(),
+  ARIMA_Order = character(),
+  AIC = numeric(),
+  BIC = numeric(),
+  LogLik = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Fill summary table
+for (commodity in names(commodity_models)) {
+  model <- commodity_models[[commodity]]
+  # The model is already on differenced data (d=0 in the model itself)
+  order_p <- model$arma[1]
+  order_q <- model$arma[2]
+  
+  model_summary <- rbind(model_summary, data.frame(
+    Commodity = commodity,
+    ARIMA_Order = paste0("ARIMA(", order_p, ",0,", order_q, ")"),
+    AIC = model$aic,
+    BIC = model$bic,
+    LogLik = model$loglik,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Print summary table
+cat("\n===============================================================\n")
+cat("Summary of Best ARIMA Models for Each Commodity (Log Differenced Series)\n")
+cat("===============================================================\n")
+print(model_summary[order(model_summary$AIC),])
+
+# Recommendations based on ACF/PACF patterns and auto.arima results
+cat("\n===============================================================\n")
+cat("RECOMMENDED MODELS FOR EACH COMMODITY (Log Differenced Series)\n")
+cat("Based on ACF/PACF patterns and auto.arima results\n")
+cat("===============================================================\n")
+
+# Function to provide specific recommendations based on ACF/PACF analysis
+recommend_model <- function(commodity, model) {
+  order_p <- model$arma[1]
+  order_q <- model$arma[2]
+  
+  cat(commodity, ":", paste0("ARIMA(", order_p, ",0,", order_q, ")"), "\n")
+  cat("  AIC:", round(model$aic, 2), "\n")
+  
+  # Add specific comments based on commodity and ACF/PACF analysis
+  if(commodity == "Coffee") {
+    cat("  Comment: The ACF and PACF plots show limited significant autocorrelations\n")
+    cat("           with spikes at various lags but no clear pattern. This suggests a \n") 
+    cat("           relatively weak dependency structure, possibly close to white noise.\n\n")
+  } else if(commodity == "Copper") {
+    cat("  Comment: ACF and PACF show significant spikes around lags 10 and 15,\n")
+    cat("           suggesting potential seasonal or cyclical patterns in copper prices.\n")
+    cat("           The model needs both AR and MA terms to capture these dynamics.\n\n")
+  } else if(commodity == "Corn") {
+    cat("  Comment: Strong initial spike in ACF with significant PACF at lags 18-20\n")
+    cat("           suggests both short-term momentum and longer cyclical effects.\n")
+    cat("           This aligns with agricultural commodity cycles.\n\n")
+  } else if(commodity == "Cotton") {
+    cat("  Comment: More evenly distributed small spikes across both ACF and PACF\n")
+    cat("           suggest a more efficient price process with limited predictability.\n\n")
+  } else if(commodity == "Lumber") {
+    cat("  Comment: Few significant lags in ACF/PACF indicate lumber log returns\n")
+    cat("           follow a process close to random walk with minimal autocorrelation.\n\n")
+  } else if(commodity == "Oats") {
+    cat("  Comment: Notable spikes at lags 7 and 12 may indicate weekly patterns and\n")
+    cat("           annual seasonality corresponding to harvesting cycles.\n\n")
+  } else if(commodity == "Soybean") {
+    cat("  Comment: Multiple significant lags in ACF/PACF with a more complex pattern\n")
+    cat("           suggest both short and medium-term price dependencies.\n\n")
+  } else if(commodity == "Wheat") {
+    cat("  Comment: Relatively noisy ACF/PACF with some structure. The selected model\n")
+    cat("           balances complexity with explanatory power for wheat price movements.\n\n")
+  }
+}
+
+# Print recommendations
+for (commodity in names(commodity_models)) {
+  recommend_model(commodity, commodity_models[[commodity]])
+}
+```
+```{r}
+# Function to fit auto.arima model and provide summary information
+fit_auto_arima <- function(data, commodity_name) {
+  # Remove NA values from log_diff_value
+  clean_data <- na.omit(data[, c("date", "log_diff_value")])
+  
+  # Convert to time series object - we're working with log differenced data
+  # Note that we're using the log_diff_value column directly
+  ts_data <- ts(clean_data$log_diff_value)
+  
+  # Fit auto.arima model with d=0 since we're already using differenced data
+  cat("\n=======================================================\n")
+  cat("ARIMA Model Analysis for", commodity_name, "(Log Differenced Series)\n")
+  cat("=======================================================\n")
+  
+  # Set d=0 since data is already differenced
+  # Use ic="bic" to select models based on SBIC instead of AIC
+  model <- auto.arima(ts_data, d=0, seasonal = FALSE, stepwise = FALSE, 
+                     approximation = FALSE, trace = TRUE, ic="bic")
+  
+  # Print model summary
+  cat("\nBest Model Summary:\n")
+  print(summary(model))
+  
+  # Return model
+  return(model)
+}
+
+# Function to create forecast plots
+plot_arima_forecast <- function(model, data, commodity_name) {
+  # Clean data
+  clean_data <- na.omit(data[, c("date", "log_diff_value")])
+  ts_data <- ts(clean_data$log_diff_value)
+  
+  # Generate forecast
+  forecast_result <- forecast(model, h = 12)  # Forecast 12 periods ahead
+  
+  # Plot the forecast
+  plot_forecast <- autoplot(forecast_result) +
+    theme_minimal() +
+    labs(title = paste(commodity_name, "- ARIMA Forecast of Log Differenced Series"),
+         x = "Time", y = "Log Price Change") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Plot the model diagnostics
+  plot_diagnostics <- checkresiduals(model, plot = FALSE)
+  
+  # Create diagnostic plots manually for better control
+  residuals <- residuals(model)
+  
+  # Residual plot
+  p1 <- ggplot(data.frame(x = 1:length(residuals), y = residuals), aes(x = x, y = y)) +
+    geom_line() +
+    theme_minimal() +
+    labs(title = "Residuals", x = "Time", y = "")
+  
+  # ACF of residuals
+  p2 <- ggAcf(residuals) +
+    theme_minimal() +
+    labs(title = "ACF of Residuals")
+  
+  # Histogram of residuals
+  p3 <- ggplot(data.frame(residuals = residuals), aes(x = residuals)) +
+    geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+    theme_minimal() +
+    labs(title = "Histogram of Residuals", x = "")
+  
+  # Normal Q-Q plot
+  p4 <- ggplot(data.frame(residuals = residuals), aes(sample = residuals)) +
+    stat_qq() +
+    stat_qq_line() +
+    theme_minimal() +
+    labs(title = "Normal Q-Q Plot")
+  
+  # Arrange diagnostic plots
+  grid.arrange(plot_forecast, 
+               arrangeGrob(p1, p2, p3, p4, ncol = 2),
+               ncol = 1, heights = c(1, 1.2))
+  
+  # Return diagnostic statistics
+  return(Box.test(residuals, lag = 10, type = "Ljung-Box"))
+}
+
+# List of commodities and their transformed data
+commodities <- list(
+  Coffee = coffee_trans,
+  Copper = copper_trans,
+  Corn = corn_trans,
+  Cotton = cotton_trans,
+  Lumber = lumber_trans,
+  Oats = oats_trans,
+  Soybean = soybean_trans,
+  Wheat = wheat_trans
+)
+
+# Create container to store models
+commodity_models <- list()
+
+# Loop through commodities and fit ARIMA models
+for (commodity in names(commodities)) {
+  # Fit model
+  model <- fit_auto_arima(commodities[[commodity]], commodity)
+  
+  # Store model
+  commodity_models[[commodity]] <- model
+  
+  # Plot forecast
+  plot_arima_forecast(model, commodities[[commodity]], commodity)
+}
+
+# Create summary table of all models
+model_summary <- data.frame(
+  Commodity = character(),
+  ARIMA_Order = character(),
+  AIC = numeric(),
+  BIC = numeric(),
+  LogLik = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Fill summary table
+for (commodity in names(commodity_models)) {
+  model <- commodity_models[[commodity]]
+  # The model is already on differenced data (d=0 in the model itself)
+  order_p <- model$arma[1]
+  order_q <- model$arma[2]
+  
+  model_summary <- rbind(model_summary, data.frame(
+    Commodity = commodity,
+    ARIMA_Order = paste0("ARIMA(", order_p, ",0,", order_q, ")"),
+    AIC = model$aic,
+    BIC = model$bic,
+    LogLik = model$loglik,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Print summary table
+cat("\n===============================================================\n")
+cat("Summary of Best ARIMA Models for Each Commodity (Log Differenced Series)\n")
+cat("Selected using SBIC criterion\n")
+cat("===============================================================\n")
+print(model_summary[order(model_summary$BIC),])  # Sort by BIC instead of AIC
+
+# Recommendations based on ACF/PACF patterns and auto.arima results
+cat("\n===============================================================\n")
+cat("RECOMMENDED MODELS FOR EACH COMMODITY (Log Differenced Series)\n")
+cat("Based on ACF/PACF patterns and auto.arima results using SBIC criterion\n")
+cat("===============================================================\n")
+
+# Function to provide specific recommendations based on ACF/PACF analysis
+recommend_model <- function(commodity, model) {
+  order_p <- model$arma[1]
+  order_q <- model$arma[2]
+  
+  cat(commodity, ":", paste0("ARIMA(", order_p, ",0,", order_q, ")"), "\n")
+  cat("  BIC:", round(model$bic, 2), "\n")  # Report BIC instead of AIC
+  
+  # Add specific comments based on commodity and ACF/PACF analysis
+  if(commodity == "Coffee") {
+    cat("  Comment: The ACF and PACF plots show limited significant autocorrelations\n")
+    cat("           with spikes at various lags but no clear pattern. SBIC likely\n") 
+    cat("           selected a more parsimonious model compared to AIC.\n\n")
+  } else if(commodity == "Copper") {
+    cat("  Comment: ACF and PACF show significant spikes around lags 10 and 15,\n")
+    cat("           suggesting potential seasonal or cyclical patterns. SBIC\n")
+    cat("           balances these patterns with a more conservative lag structure.\n\n")
+  } else if(commodity == "Corn") {
+    cat("  Comment: Strong initial spike in ACF with significant PACF at lags 18-20\n")
+    cat("           suggests both short-term momentum and longer cyclical effects.\n")
+    cat("           SBIC likely reduced unnecessary lags while preserving key patterns.\n\n")
+  } else if(commodity == "Cotton") {
+    cat("  Comment: More evenly distributed small spikes across both ACF and PACF\n")
+    cat("           suggest a more efficient price process. SBIC favors a simpler model\n")
+    cat("           that avoids overfitting these minor correlations.\n\n")
+  } else if(commodity == "Lumber") {
+    cat("  Comment: Few significant lags in ACF/PACF indicate lumber log returns\n")
+    cat("           follow a process close to random walk. SBIC likely selected\n")
+    cat("           a very parsimonious model structure.\n\n")
+  } else if(commodity == "Oats") {
+    cat("  Comment: Notable spikes at lags 7 and 12 may indicate weekly patterns and\n")
+    cat("           annual seasonality. SBIC likely retained only the most significant\n")
+    cat("           of these patterns in the model.\n\n")
+  } else if(commodity == "Soybean") {
+    cat("  Comment: Multiple significant lags in ACF/PACF with a complex pattern.\n")
+    cat("           SBIC provides a more conservative model that focuses on\n")
+    cat("           the strongest dependencies only.\n\n")
+  } else if(commodity == "Wheat") {
+    cat("  Comment: Relatively noisy ACF/PACF with some structure. SBIC criterion\n")
+    cat("           likely produced a more parsimonious model than AIC would have.\n\n")
+  }
+}
+
+# Print recommendations
+for (commodity in names(commodity_models)) {
+  recommend_model(commodity, commodity_models[[commodity]])
 }
 ```
 
